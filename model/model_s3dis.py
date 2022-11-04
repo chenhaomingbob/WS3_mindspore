@@ -257,7 +257,7 @@ class RandLA_S3DIS_WithLoss(nn.Cell):
         mean_embed = sum_embed / (P.reduce_sum(valid_one_hot_label_T, axis=1).reshape(-1, 1) + 0.001)
         # => 求unlabelled points 与 class embedding的相似度
         # adj_matrix 欧式距离，距离越大说明越不相似  [N,M]
-        adj_matrix = self.double_feature(invalid_embed, mean_embed)
+        adj_matrix = RandLA_S3DIS_WithLoss.double_feature(invalid_embed, mean_embed)
         # adj_matrix = RandLA_S3DIS_WithLoss.double_feature(invalid_embed, mean_embed)
 
         # => 稀疏点，N个点中M分别找K和最相似的，把没有和任何M相似的去掉（说明这些点不容易分）
