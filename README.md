@@ -17,9 +17,13 @@ WS3
 └── train_modelarts.py  # modelarts训练作业的启动入口
 ```
 
+# 数据集S3DIS
+
+
+
 # 本地GPU训练
 ```shell
-python train.py
+python train.py --device_target GPU
 ```
 
 
