@@ -77,9 +77,10 @@ class S3DISLossMonitor(Callback):
         cur_step_in_epoch = (cb_params.cur_step_num - 1) % cb_params.batch_num + 1
 
         if isinstance(loss, float) and (np.isnan(loss) or np.isinf(loss)):
-            raise ValueError(f"epoch: {cb_params.cur_epoch_num} "
-                             f"step: {cur_step_in_epoch}. "
-                             f"Invalid loss {loss}, terminating training.")
+            raise ValueError("epoch: {} step: {}. Invalid loss {}, terminating training."
+                             "CE Loss {}; SP Loss {}".format(cb_params.cur_epoch_num, cur_step_in_epoch, loss,
+                                                             cb_params.network.CE_LOSS.asnumpy(),
+                                                             cb_params.network.SP_LOSS.asnumpy()))
 
         # In disaster recovery scenario, the cb_params.cur_step_num may be rollback to previous step
         # and be less than self._last_print_time, so self._last_print_time need to be updated.
@@ -90,21 +91,15 @@ class S3DISLossMonitor(Callback):
 
         if self._per_print_times != 0 and (cb_params.cur_step_num - self._last_print_time) >= self._per_print_times:
             self._last_print_time = cb_params.cur_step_num
-            # self.train_network_with_loss = cb_params.network
+            self.train_network_with_loss = cb_params.network
 
-            msg = f"epoch: {cb_params.cur_epoch_num} step: {cur_step_in_epoch}, " \
-                  f"loss is {loss} "
-            # if isinstance(self.train_network_with_loss, Tensor):
-            #     msg = f"epoch: {cb_params.cur_epoch_num} step: {cur_step_in_epoch}, " \
-            #           f"loss is {loss} " \
-            #           f"(CE Loss:{ce_loss}; " \
-            #           f"SP Loss:{self.train_network_with_loss.SP_LOSS.asnumpy()})"
-            # else:
-            #     msg = f"epoch: {cb_params.cur_epoch_num} step: {cur_step_in_epoch}, " \
-            #           f"loss is {loss} " \
-            #           f"(CE Loss:{self.train_network_with_loss.CE_LOSS}; " \
-            #           f"SP Loss:{self.train_network_with_loss.SP_LOSS})"
-            # f"loss is {loss} (CE Loss:{self.train_network_with_loss.CE_LOSS.asnumpy()}; SP Loss:{self.train_network_with_loss.SP_LOSS.asnumpy()})"
+            if isinstance(self.train_network_with_loss, Tensor):
+                msg = f"epoch: {cb_params.cur_epoch_num} step: {cur_step_in_epoch}, " \
+                      f"loss is {loss} (CE Loss:{self.train_network_with_loss.CE_LOSS.asnumpy()}; SP Loss:{self.train_network_with_loss.SP_LOSS.asnumpy()})"
+            else:
+                msg = f"epoch: {cb_params.cur_epoch_num} step: {cur_step_in_epoch}, " \
+                      f"loss is {loss} (CE Loss:{self.train_network_with_loss.CE_LOSS}; SP Loss:{self.train_network_with_loss.SP_LOSS})"
+                # f"loss is {loss} (CE Loss:{self.train_network_with_loss.CE_LOSS.asnumpy()}; SP Loss:{self.train_network_with_loss.SP_LOSS.asnumpy()})"
             #  self.train_network_with_loss.CE_LOSS.dtype == Parameters
             #  self.train_network_with_loss.SP_LOSS.dtype == Parameters
             self.logger.info(msg)
@@ -144,6 +139,7 @@ def train(cfg, args):
     else:
         context.set_context(mode=context.PYNATIVE_MODE, device_target=args.device_target, device_id=args.device_id)
     # Init Profiler
+    profiler = ms.Profiler(output_path=args.outputs_dir + '/profiler_data')
     logger = get_logger(args.outputs_dir, args.rank)
 
     logger.info("============ Args =================")
@@ -177,11 +173,9 @@ def train(cfg, args):
     if args.resume:
         f = open(args.resume + '/log.pkl', 'rb')
         log = pickle.load(f)
-        print(f"log of resume file {log}")
         f.close()
-        param_dict = load_checkpoint(args.resume)
-        load_param_into_net(network, param_dict)
-        # load_param_into_net(network, args.resume)
+        param = load_checkpoint(args.resume)
+        load_param_into_net(network, args.resume)
 
     # data loader
 
@@ -222,8 +216,7 @@ def train(cfg, args):
 
     # callback for saving ckpt
     config_ckpt = CheckpointConfig(save_checkpoint_steps=cfg.train_steps, keep_checkpoint_max=100)
-    ckpt_cb = ModelCheckpoint(prefix='randla',
-                              directory=os.path.join(args.outputs_dir, 'ckpt'),
+    ckpt_cb = ModelCheckpoint(prefix='randla', directory=os.path.join(args.outputs_dir, 'ckpt'),
                               config=config_ckpt)
     cbs += [ckpt_cb]
 
@@ -241,8 +234,7 @@ def train(cfg, args):
 
     logger.info('==========end training===============')
     # Profiler end
-    # profiler.analyse()
-
+    profiler.analyse()
 
 if __name__ == "__main__":
     """Parse program arguments"""

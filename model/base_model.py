@@ -120,7 +120,8 @@ class LocalSpatialEncoding(nn.Cell):
 
         f_tile = P.Tile()(features, (1, 1, 1, idx.shape[-1]))  # (4, 8, 40960, 1) -> (4,8,40960,16)
         extended_idx_for_feat = P.Tile()(idx.expand_dims(1), (1, f_xyz.shape[1], 1, 1))
-        f_neighbours = P.GatherD()(f_tile, 2, extended_idx_for_feat)  # (4,8,40960,16) -> (4,8,40960,16)
+        # (4,8,40960,16) -> (4,8,40960,16)
+        f_neighbours = P.GatherD()(f_tile, 2, extended_idx_for_feat.astype(ms.int32))
 
         f_concat = cat([f_xyz, f_neighbours])  # (4,8,40960,16) & (4,8,40960,16) -> (4,16,40960,16)
 
