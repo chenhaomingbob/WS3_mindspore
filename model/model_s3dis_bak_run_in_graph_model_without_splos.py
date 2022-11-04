@@ -4,13 +4,13 @@
     E-mail: chenhaomingbob@163.com
     Time: 2022/06/23
     Description:
-        v1. 不往graph mode上改
+         v2. 往graph mode上改，但忽略了sp loss
 """
 import mindspore as ms
 import mindspore.nn as nn
 import mindspore.ops as P
 from .base_model import SharedMLP, LocalFeatureAggregation
-from mindspore import Tensor, Parameter
+from mindspore import Tensor, Parameter, ms_function
 from mindspore import dtype as mstype
 
 
@@ -121,8 +121,9 @@ class RandLANet_S3DIS(nn.Cell):
 
         return f_out  # (B,N_points,45)
 
-    @staticmethod
-    def random_sample(feature, pool_idx):
+    # @staticmethod
+    @ms_function
+    def random_sample(self, feature, pool_idx):
         """
         :param feature: [B, d, N, 1] input features matrix
         :param pool_idx: [B, N', max_num] N' < N, N' is the selected position after pooling
@@ -166,7 +167,8 @@ class RandLA_S3DIS_WithLoss(nn.Cell):
 
         self.Batch_size = 1
 
-    def construct(self, feature, feature2, labels, input_inds, cloud_inds, p0, p1, p2, p3, p4, n0, n1, n2, n3, n4, pl0,
+    def construct(self, feature, feature2, labels, input_inds, cloud_inds,
+                  p0, p1, p2, p3, p4, n0, n1, n2, n3, n4, pl0,
                   pl1, pl2, pl3, pl4, u0, u1, u2, u3, u4):
         # print("test_dict",len(test_dict))
         # return Tensor(1.0)
@@ -207,121 +209,123 @@ class RandLA_S3DIS_WithLoss(nn.Cell):
         unweighted_loss = self.loss_fn(logits, one_hot_labels)
         weighted_loss = unweighted_loss * weights
         weighted_loss = weighted_loss * valid_mask
-        CE_loss = weighted_loss.sum() / int(P.count_nonzero(valid_mask.astype(mstype.int32)))
+        CE_loss = P.ReduceSum()(weighted_loss)
+        num_valid_points = P.ReduceSum()(valid_mask.astype(mstype.float32))
+        # num_valid_points_2 = int(P.count_nonzero(valid_mask.astype(mstype.int32)))
+        # CE_loss = P.ReduceSum()(weighted_loss).sum()
+        CE_loss = CE_loss / num_valid_points
         ###
 
         if self.c_epoch_k == 0:
-            self.CE_LOSS = CE_loss
-            self.SP_LOSS = 0
-            loss = CE_loss
+            # self.CE_LOSS = CE_loss
+            # CE_LOSS = CE_loss
+            # SP_LOSS = Tensor(0, dtype=mstype.float32)
             # self.SP_LOSS = 0
+            loss = CE_loss
         else:
-            SP_loss = self.get_sp_loss_by_mask(pred_embed, logits, one_hot_labels, valid_mask,
-                                               self.topk) * self.c_epoch_k
-            self.CE_LOSS = CE_loss
-            self.SP_LOSS = SP_loss
+            # =====  get sp loss by mask =====
+
+            # =====  get sp loss by mask =====
+            SP_loss = get_sp_loss_by_mask(pred_embed, logits, one_hot_labels, valid_mask,
+                                          self.topk) * self.c_epoch_k
             loss = CE_loss + SP_loss
 
         return loss
         # return loss
 
-    def nonZero(self, inpbool):
-        out = []
-        for _, inp in enumerate(inpbool):
-            if inp:
-                out.append(inp)
-        return Tensor(out, mstype.int32)
+    # @staticmethod
 
-    @staticmethod
-    def get_sp_loss_by_mask(embed, logits, one_hot_label, valid_mask, topk):
-        """
 
-        Args:
-            embed:
-            logits:
-            one_hot_label:
-            valid_mask:
-            topk:
+@ms_function
+def get_sp_loss_by_mask(embed, logits, one_hot_label, valid_mask, topk):
+    """
 
-        Returns:
+    Args:
+        embed:
+        logits:
+        one_hot_label:
+        valid_mask:
+        topk:
 
-        """
-        invalid_mask = P.logical_not(valid_mask)  # (B*N,)
-        num_invalid_points = int(P.count_nonzero(invalid_mask.astype(mstype.int32)))
-        topk += num_invalid_points
-        # 点类别的数量
-        num_class = one_hot_label.shape[1]  # scalar: 13
+    Returns:
 
-        valid_one_hot_label = one_hot_label * valid_mask.reshape(-1, 1)  # (B*N,13)
-        valid_embed = embed * valid_mask.reshape(-1, 1)  # (B*N,32)
-        invalid_embed = embed * invalid_mask.reshape(-1, 1)  # (B*N,32)
-        # => 将有效点的label矩阵进行转置:[M,class_num] -> [class_num,M] (13,B*N)
-        valid_one_hot_label_T = P.transpose(valid_one_hot_label, (1, 0))
-        # => 每一行那个类有那些点:[class_num,B*N] * [B*N,dim] -> [class_num,dim]
-        sum_embed = P.matmul(valid_one_hot_label_T, valid_embed)
-        # => 求class的平均嵌入:[class_num,dim]
-        # mean_embed 为每个类别的embedding，如果这个类别没有样本，则embedding全为0
-        mean_embed = sum_embed / (P.reduce_sum(valid_one_hot_label_T, axis=1).reshape(-1, 1) + 0.001)
-        # => 求unlabelled points 与 class embedding的相似度
-        # adj_matrix 欧式距离，距离越大说明越不相似  [N,M]
-        adj_matrix = RandLA_S3DIS_WithLoss.double_feature(invalid_embed, mean_embed)
+    """
+    invalid_mask = P.logical_not(valid_mask)  # (B*N,)
+    num_invalid_points = int(P.count_nonzero(invalid_mask.astype(mstype.int32)))
+    topk += num_invalid_points
+    # 点类别的数量
+    num_class = one_hot_label.shape[1]  # scalar: 13
 
-        # => 稀疏点，N个点中M分别找K和最相似的，把没有和任何M相似的去掉（说明这些点不容易分）
-        neg_adj = -adj_matrix  # (B*N,13) 取负
-        # 转置为了下一步 [N, M] -> [M,N] (M是有标签的点)
-        neg_adj_t = P.transpose(neg_adj, (1, 0))  # (13,B*N)
-        # 取最不相似的 top k个点
-        _, nn_idx = P.TopK()(neg_adj_t, topk)
-        s = P.shape(neg_adj_t)  # s (M,N)
-        row_idx = P.tile(P.expand_dims(P.arange(s[0]), 1), (1, topk))
-        ones_idx = P.Stack(axis=1)([row_idx.reshape([-1]), nn_idx.reshape([-1])])
-        res = P.scatter_nd(ones_idx, P.ones(s[0] * topk, neg_adj_t.dtype), s)
-        nn_idx_multi_hot = P.transpose(res, (1, 0))  # [N,M] multi_hot
+    valid_one_hot_label = one_hot_label * valid_mask.reshape(-1, 1)  # (B*N,13)
+    valid_embed = embed * valid_mask.reshape(-1, 1)  # (B*N,32)
+    invalid_embed = embed * invalid_mask.reshape(-1, 1)  # (B*N,32)
+    # => 将有效点的label矩阵进行转置:[M,class_num] -> [class_num,M] (13,B*N)
+    valid_one_hot_label_T = P.transpose(valid_one_hot_label, (1, 0))
+    # => 每一行那个类有那些点:[class_num,B*N] * [B*N,dim] -> [class_num,dim]
+    sum_embed = P.matmul(valid_one_hot_label_T, valid_embed)
+    # => 求class的平均嵌入:[class_num,dim]
+    # mean_embed 为每个类别的embedding，如果这个类别没有样本，则embedding全为0
+    mean_embed = sum_embed / (P.reduce_sum(valid_one_hot_label_T, axis=1).reshape(-1, 1) + 0.001)
+    # => 求unlabelled points 与 class embedding的相似度
+    # adj_matrix 欧式距离，距离越大说明越不相似  [N,M]
+    adj_matrix = double_feature(invalid_embed, mean_embed)
+    # adj_matrix = RandLA_S3DIS_WithLoss.double_feature(invalid_embed, mean_embed)
 
-        new_valid_mask = P.reduce_sum(nn_idx_multi_hot, axis=1) > 0  # (B*N,)
-        new_valid_mask = new_valid_mask.reshape(-1, 1)  # (B*N,1)
-        num_new_valid_mask = int(P.count_nonzero(new_valid_mask.astype(mstype.int32)))
+    # => 稀疏点，N个点中M分别找K和最相似的，把没有和任何M相似的去掉（说明这些点不容易分）
+    neg_adj = -adj_matrix  # (B*N,13) 取负
+    # 转置为了下一步 [N, M] -> [M,N] (M是有标签的点)
+    neg_adj_t = P.transpose(neg_adj, (1, 0))  # (13,B*N)
+    # 取最不相似的 top k个点
+    _, nn_idx = P.TopK()(neg_adj_t, topk)
+    s = P.shape(neg_adj_t)  # s (M,N)
+    row_idx = P.tile(P.expand_dims(P.arange(s[0]), 1), (1, topk))
+    ones_idx = P.Stack(axis=1)([row_idx.reshape([-1]), nn_idx.reshape([-1])])
+    res = P.scatter_nd(ones_idx, P.ones(s[0] * topk, neg_adj_t.dtype), s)
+    nn_idx_multi_hot = P.transpose(res, (1, 0))  # [N,M] multi_hot
 
-        w_ij = P.exp(-1.0 * adj_matrix)  # (B*N,13)
-        w_ij = w_ij * new_valid_mask  # (B*N,13)
-        w_ij_label = nn_idx_multi_hot * new_valid_mask  # (B*N,13)
-        w_ij = P.mul(w_ij, w_ij_label)  # (B*N,13)
+    new_valid_mask = P.reduce_sum(nn_idx_multi_hot, axis=1) > 0  # (B*N,)
+    new_valid_mask = new_valid_mask.reshape(-1, 1)  # (B*N,1)
+    num_new_valid_mask = int(P.count_nonzero(new_valid_mask.astype(mstype.int32)))
 
-        new_soft_label_hot = nn.Softmax(axis=-1)(w_ij)  # (B*N,13)
-        top1 = new_soft_label_hot.argmax(axis=-1)
-        soft_label_mask = P.OneHot()(top1, num_class, Tensor(1.0), Tensor(0.0))
-        new_soft_label_hot = P.mul(new_soft_label_hot, soft_label_mask)
-        # method one
-        # loss = nn.SoftmaxCrossEntropyWithLogits()(logits, new_soft_label_hot)  # (284,13) (284,13)
-        # loss = loss * new_valid_mask
-        # loss = loss.sum() / num_new_valid_mask
-        # return loss
-        # method two
-        logits = logits * new_valid_mask
-        new_soft_label_hot = new_soft_label_hot * new_valid_mask
-        loss = nn.SoftmaxCrossEntropyWithLogits()(logits, new_soft_label_hot)
-        loss = loss.sum() / num_new_valid_mask
+    w_ij = P.exp(-1.0 * adj_matrix)  # (B*N,13)
+    w_ij = w_ij * new_valid_mask  # (B*N,13)
+    w_ij_label = nn_idx_multi_hot * new_valid_mask  # (B*N,13)
+    w_ij = P.mul(w_ij, w_ij_label)  # (B*N,13)
 
-        return loss
+    new_soft_label_hot = nn.Softmax(axis=-1)(w_ij)  # (B*N,13)
+    top1 = new_soft_label_hot.argmax(axis=-1)
+    soft_label_mask = P.OneHot()(top1, num_class, Tensor(1.0), Tensor(0.0))
+    new_soft_label_hot = P.mul(new_soft_label_hot, soft_label_mask)
 
-    @staticmethod
-    def double_feature(point_feature1, point_feature2):
-        """
-        Compute pairwise distance of a point cloud.
-        Args:
-        [N,C],[M,C]
-            point_cloud: tensor (batch_size, num_points, num_dims)
-        Returns:
-            pairwise distance: (batch_size, num_points, num_points)
-        """
-        point2_transpose = P.transpose(point_feature2, (1, 0))  # [C, M]
-        point_inner = P.matmul(point_feature1, point2_transpose)  # [N,M]
-        point_inner = -2 * point_inner
+    logits = logits * new_valid_mask
+    new_soft_label_hot = new_soft_label_hot * new_valid_mask
+    loss = nn.SoftmaxCrossEntropyWithLogits()(logits, new_soft_label_hot)
+    loss = loss.sum() / num_new_valid_mask
 
-        point1_square = P.ReduceSum(keep_dims=True)(P.square(point_feature1), axis=-1)
-        point2_square = P.ReduceSum(keep_dims=True)(P.square(point_feature2), axis=-1)
+    return loss
 
-        point2_square_transpose = P.transpose(point2_square, (1, 0))  # [1,M]
-        adj_matrix = point1_square + point_inner + point2_square_transpose
+    # @staticmethod
+    # @ms_function
 
-        return adj_matrix
+
+@ms_function
+def double_feature(point_feature1, point_feature2):
+    """
+    Compute pairwise distance of a point cloud.
+    Args:
+    [N,C],[M,C]
+        point_cloud: tensor (batch_size, num_points, num_dims)
+    Returns:
+        pairwise distance: (batch_size, num_points, num_points)
+    """
+    point2_transpose = P.transpose(point_feature2, (1, 0))  # [C, M]
+    point_inner = P.matmul(point_feature1, point2_transpose)  # [N,M]
+    point_inner = -2 * point_inner
+
+    point1_square = P.ReduceSum(keep_dims=True)(P.square(point_feature1), axis=-1)
+    point2_square = P.ReduceSum(keep_dims=True)(P.square(point_feature2), axis=-1)
+
+    point2_square_transpose = P.transpose(point2_square, (1, 0))  # [1,M]
+    adj_matrix = point1_square + point_inner + point2_square_transpose
+
+    return adj_matrix
